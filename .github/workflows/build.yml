@@ -2,9 +2,7 @@ name: Build Classic98
 
 on:
   push:
-    branches:
-      - main
-      - master
+    branches: [main, master]
   workflow_dispatch:
 
 concurrency:
@@ -12,42 +10,58 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # ------------------------------------------------------------
-  # Android (armeabi-v7a + arm64-v8a + others)
-  # ------------------------------------------------------------
+  # ============================================================
+  # Android (armeabi-v7a + arm64-v8a)
+  # ============================================================
   android:
     name: Android (armeabi-v7a + arm64)
-    timeout-minutes: 25
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/saschpe/android-ndk:34-jdk17.0.8_7-ndk25.2.9519653-cmake3.22.1
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install prerequisites
-        run: apt-get update && apt-get install -y make wget unzip
+      - name: Install tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends make wget unzip
 
-      - name: Retrieve build tools
-        shell: bash
+      - name: Show environment (debug)
+        run: |
+          echo "=== NDK / SDK paths ==="
+          ls -la /opt/android-sdk-linux/ 2>/dev/null || echo "No /opt/android-sdk-linux"
+          ls -la /opt/android-sdk-linux/ndk/ 2>/dev/null || true
+          which clang || true
+          echo "PWD=$PWD"
+
+      - name: Get build-tools (aapt, dx, zipalign)
         run: |
           mkdir -p build-tools
-          wget -q https://github.com/ClassiCube/rpi-compiling-stuff/raw/main/build-tools.zip
+          wget -q https://github.com/ClassiCube/rpi-compiling-stuff/raw/main/build-tools.zip -O build-tools.zip
           unzip -o build-tools.zip -d build-tools
-          chmod +x build-tools/aapt build-tools/dx build-tools/zipalign
+          chmod +x build-tools/aapt build-tools/dx build-tools/zipalign build-tools/apksigner 2>/dev/null || true
+          ls -la build-tools/
 
       - name: Create debug keystore
-        shell: bash
         run: |
           keytool -genkeypair -v -keystore debug.keystore \
             -storepass android -keypass android \
             -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 \
             -dname "CN=Classic98, OU=Classic98, O=Classic98, C=PE"
 
-      - name: Compile Android (includes armeabi-v7a + arm64-v8a)
-        shell: bash
+      - name: Build Android APK
         run: |
-          COMMON_CFLAGS="-fno-stack-protector"
-          make android EXTRA_CFLAGS="$COMMON_CFLAGS"
+          # Force the paths the Makefile expects
+          export NDK_ROOT=/opt/android-sdk-linux/ndk/25.2.9519653
+          export SDK_ROOT=/opt/android-sdk-linux/platforms/android-34
+          export TOOLS_ROOT=$PWD/build-tools
+
+          # Check they exist
+          ls -la "$NDK_ROOT" || { echo "NDK not found"; ls /opt/android-sdk-linux/ndk/; exit 1; }
+          ls -la "$SDK_ROOT" || { echo "SDK platform not found"; exit 1; }
+
+          make android EXTRA_CFLAGS="-fno-stack-protector" -j$(nproc)
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
@@ -56,87 +70,110 @@ jobs:
           path: |
             Classic98-signed.apk
             Classic98-unsigned.apk
+            **/*.apk
           if-no-files-found: warn
 
-  # ------------------------------------------------------------
-  # Windows x86_64 (64-bit)
-  # ------------------------------------------------------------
+  # ============================================================
+  # Windows x86_64
+  # ============================================================
   windows-x64:
     name: Windows x86_64
-    timeout-minutes: 20
+    timeout-minutes: 25
     runs-on: windows-latest
-    defaults:
-      run:
-        shell: msys2 {0}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup MSYS2 + MinGW64
+      - name: Setup MSYS2 (MINGW64)
         uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
           update: true
           install: >-
             mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-make
+            mingw-w64-x86_64-binutils
             make
             zip
 
-      - name: Build Windows 64-bit
+      - name: Build
+        shell: msys2 {0}
         run: |
-          make windows RELEASE=1 CC=x86_64-w64-mingw32-gcc
-          # Rename to clear name
-          if [ -f ClassiCube.exe ]; then mv ClassiCube.exe Classic98-win64.exe; fi
-          if [ -f Classic98.exe ]; then mv Classic98.exe Classic98-win64.exe; fi
-          ls -la *.exe || true
+          set -e
+          echo "=== Compilers ==="
+          which gcc
+          which x86_64-w64-mingw32-gcc || true
+          gcc --version
 
-      - name: Upload Windows 64-bit
+          # The windows.mk forces CC := gcc, so just use the 64-bit gcc from MINGW64
+          make windows RELEASE=1 -j4
+
+          echo "=== Output files ==="
+          ls -la *.exe build/windows/ 2>/dev/null || true
+          find . -name "*.exe" -type f
+
+          # Rename if needed
+          if [ -f Classic98.exe ]; then
+            cp Classic98.exe Classic98-win64.exe
+          elif [ -f ClassiCube.exe ]; then
+            cp ClassiCube.exe Classic98-win64.exe
+          fi
+
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
           name: Classic98-windows-x64
           path: |
             Classic98-win64.exe
+            Classic98.exe
             ClassiCube.exe
-            *.exe
           if-no-files-found: warn
 
-  # ------------------------------------------------------------
+  # ============================================================
   # Windows x86 (32-bit)
-  # ------------------------------------------------------------
+  # ============================================================
   windows-x86:
     name: Windows x86 (32-bit)
-    timeout-minutes: 20
+    timeout-minutes: 25
     runs-on: windows-latest
-    defaults:
-      run:
-        shell: msys2 {0}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup MSYS2 + MinGW32
+      - name: Setup MSYS2 (MINGW32)
         uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW32
           update: true
           install: >-
             mingw-w64-i686-gcc
-            mingw-w64-i686-make
+            mingw-w64-i686-binutils
             make
             zip
 
-      - name: Build Windows 32-bit
+      - name: Build
+        shell: msys2 {0}
         run: |
-          make windows RELEASE=1 CC=i686-w64-mingw32-gcc
-          if [ -f ClassiCube.exe ]; then mv ClassiCube.exe Classic98-win32.exe; fi
-          if [ -f Classic98.exe ]; then mv Classic98.exe Classic98-win32.exe; fi
-          ls -la *.exe || true
+          set -e
+          echo "=== Compilers ==="
+          which gcc
+          gcc --version
 
-      - name: Upload Windows 32-bit
+          make windows RELEASE=1 -j4
+
+          echo "=== Output files ==="
+          ls -la *.exe build/windows/ 2>/dev/null || true
+          find . -name "*.exe" -type f
+
+          if [ -f Classic98.exe ]; then
+            cp Classic98.exe Classic98-win32.exe
+          elif [ -f ClassiCube.exe ]; then
+            cp ClassiCube.exe Classic98-win32.exe
+          fi
+
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
           name: Classic98-windows-x86
           path: |
             Classic98-win32.exe
+            Classic98.exe
             ClassiCube.exe
-            *.exe
           if-no-files-found: warn
